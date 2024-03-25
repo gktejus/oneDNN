@@ -66,6 +66,11 @@ protected:
 
     bool do_scaling = false;
     bool do_dst_scaling = false;
+    // When we apply scaling to the src
+    // the post ops will need to be computed
+    // in f32 and the quantize using a default
+    // value of 1.0f
+    bool do_src_scaling = false;
     bool use_temp_dst_ = false;
     bool use_scales_dst_ = false;
     cudnnDataType_t computation_data_type = CUDNN_DATA_FLOAT;
@@ -138,6 +143,8 @@ public:
         do_scaling = !pd->attr()->scales_.has_default_values();
         do_dst_scaling
                 = !pd->attr()->scales_.get(DNNL_ARG_DST).has_default_values();
+        do_src_scaling
+                = !pd->attr()->scales_.get(DNNL_ARG_SRC).has_default_values();
         dnnl_descs[x] = *pd->invariant_src_md();
         dnnl_descs[weights] = *pd->invariant_wei_md();
         dnnl_descs[y] = *pd->invariant_dst_md();
@@ -453,8 +460,12 @@ public:
         // If the only post-op is fused then there is no need for temp dst
         if (conv_bias_eltwise && num_post_ops == 1) use_temp_dst_ = false;
 
+        // We need to take into account if we are scaling
+        // the src. In which case we will need to compute
+        // the post-ops in f32 and then quantize using a
+        // 1.0f scaling factor for dst
         if (data_types[y] == CUDNN_DATA_INT8 && use_temp_dst_
-                && !do_dst_scaling) {
+                && !(do_dst_scaling || do_src_scaling)) {
             data_types[y] = CUDNN_DATA_FLOAT;
             need_reorder = true;
             CHECK(create_and_set_tensor_descriptor_ex(&reorder_dst_desc,
@@ -462,7 +473,8 @@ public:
         }
 
         // If dst needs to be scaled and dst datatype is s8
-        if (do_dst_scaling && data_types[y] == CUDNN_DATA_INT8) {
+        if ((do_dst_scaling || do_src_scaling)
+                && data_types[y] == CUDNN_DATA_INT8) {
             CUDNN_EXECUTE_FUNC_V(
                     cudnnCreateOpTensorDescriptor, &op_tensor_desc);
             cudnnOpTensorOp_t opTensorOp = CUDNN_OP_TENSOR_ADD;
@@ -538,7 +550,7 @@ public:
         }
 
         float *y_fp32_data = nullptr;
-        if (dst_scale && data_types[io::y] == CUDNN_DATA_INT8) {
+        if ((dst_scale || src_scale) && data_types[io::y] == CUDNN_DATA_INT8) {
             y_fp32_data = (float *)args[11];
         }
 
@@ -560,7 +572,7 @@ public:
             }
         }
 
-        if (dst_scale && data_types[io::y] == CUDNN_DATA_INT8) {
+        if ((dst_scale || src_scale) && data_types[io::y] == CUDNN_DATA_INT8) {
             if (fused) {
                 auto err = cudnnConvolutionBiasActivationForward(handle, &scale,
                         descs[io::x], x, weights_desc, weights, conv_desc,
@@ -630,7 +642,8 @@ public:
                         execute_sum(handle, post_op_reorder, post_op_scratch,
                                 sum_scale, 1.0f);
                     } else if (last_op) {
-                        if (dst_scale && data_types[io::y] == CUDNN_DATA_INT8) {
+                        if ((dst_scale || src_scale)
+                                && data_types[io::y] == CUDNN_DATA_INT8) {
                             execute_f32_sum(
                                     handle, y, y_fp32_data, 1.0f, sum_scale);
                         } else {
@@ -647,7 +660,8 @@ public:
 
                 case dnnl_eltwise:
                     if (last_op) {
-                        if (dst_scale && data_types[io::y] == CUDNN_DATA_INT8) {
+                        if ((dst_scale || src_scale)
+                                && data_types[io::y] == CUDNN_DATA_INT8) {
                             execute_f32_eltwise(
                                     handle, y_fp32_data, y_fp32_data);
                         } else {
@@ -665,10 +679,11 @@ public:
             execute_reorder(handle, post_op_scratch, y, false);
         }
 
-        if (dst_scale) {
+        if (dst_scale || src_scale) {
             float host_dst_scale = 1.0f;
-            CUDA_EXECUTE_FUNC(cuMemcpy, (CUdeviceptr)&host_dst_scale,
-                    (CUdeviceptr)dst_scale, sizeof(float));
+            if (dst_scale)
+                CUDA_EXECUTE_FUNC(cuMemcpy, (CUdeviceptr)&host_dst_scale,
+                        (CUdeviceptr)dst_scale, sizeof(float));
             float inv_scale = 1.0f / host_dst_scale;
             if (data_types[io::y] == CUDNN_DATA_INT8) {
                 float alpha_beta = 0.0f;
