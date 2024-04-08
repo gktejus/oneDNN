@@ -257,10 +257,10 @@ void matmul_perf(engine::kind engine_kind, int argc, char **argv) {
         if (dims.m <= 0 || dims.n <= 0 || dims.k <= 0) bad_args();
     }
 
-    run(engine_kind, dt::f32, dims, 2.0);
-    run(engine_kind, dt::f16, dims, 2.0);
+    // run(engine_kind, dt::f32, dims, 2.0);
+    // run(engine_kind, dt::f16, dims, 2.0);
     run(engine_kind, dt::bf16, dims, 2.0);
-    run(engine_kind, dt::s8, dims, 2.0);
+    // run(engine_kind, dt::s8, dims, 2.0);
 }
 
 int main(int argc, char **argv) {
